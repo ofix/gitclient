@@ -177,6 +177,12 @@ class GithubAuthService {
     }
   }
 
+  Future<void> clearTokens() async {
+    await _storage.delete(key: _kAccessToken);
+    await _storage.delete(key: _kRefreshToken);
+    await _storage.delete(key: _kExpiresAt);
+  }
+
   Future<void> _saveTokens({
     required String accessToken,
     String? refreshToken,
