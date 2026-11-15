@@ -31,4 +31,5 @@ dev_dependencies:
 flutter:
     uses-material-design: true
     assets:
-        - assets/highlight/
+        - assets/highlight/highlight.min.js
+        - assets/highlight/styles/

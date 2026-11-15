@@ -228,7 +228,7 @@ class _SearchPageState extends State<SearchPage> {
       children: [
         Expanded(child: _buildRepoInfo(repo, owner, branch)),
         const SizedBox(width: 12),
-        _buildSideControls(repo, branch, task),
+        _buildSideControls(repo, owner, branch, task),
       ],
     );
   }
@@ -306,7 +306,7 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  Widget _buildSideControls(dynamic repo, String branch, DownloadTaskItem? task) {
+  Widget _buildSideControls(dynamic repo, String owner, String branch, DownloadTaskItem? task) {
     return Column(
       children: [
         ElSelect<String>(
@@ -316,12 +316,12 @@ class _SearchPageState extends State<SearchPage> {
           width: 110,
         ),
         const SizedBox(height: 8),
-        _buildActionBtn(repo, branch, task),
+        _buildActionBtn(repo, owner, branch, task),
       ],
     );
   }
 
-  Widget _buildActionBtn(Repository repo, String branch, DownloadTaskItem? task) {
+  Widget _buildActionBtn(Repository repo, String owner, String branch, DownloadTaskItem? task) {
     if (task == null || task.status == DownloadStatus.idle) {
       return ElButton(
         type: ElButtonType.primary,
@@ -339,8 +339,20 @@ class _SearchPageState extends State<SearchPage> {
       );
     }
     if (task.status == DownloadStatus.done) {
-      return const Text('✅ 已下载', style: TextStyle(color: ElTheme.success));
+      return ElButton(
+        onTap: () {
+          Navigator.pushNamed(
+            context,
+            '/repo-detail',
+            arguments: {'owner': owner, 'repo': repo.name, 'branch': branch},
+          );
+        },
+        width: 110,
+        type: ElButtonType.success,
+        child: const Text('✅ 打开仓库'),
+      );
     }
+
     return ElButton(
       type: ElButtonType.primary,
       width: 110,

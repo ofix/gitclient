@@ -7,6 +7,7 @@ import '../services/local_archive_service.dart';
 import '../widgets/el_theme.dart';
 import '../widgets/el_scaffold.dart';
 import '../widgets/el_appbar.dart';
+import 'code_view_page.dart';
 
 class FileTreePage extends StatefulWidget {
   final String owner;
@@ -103,17 +104,12 @@ class _FileTreePageState extends State<FileTreePage> {
       }
       return;
     }
-    final content = await LocalArchiveService.instance.readFileContent(absolutePath);
-    if (!mounted || content == null) return;
-    final lang = _langFromName(fileName);
+
+    // ✅ 不再自己读文件 + Text，直接跳 CodeViewPage
+    if (!mounted) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => ElScaffold(
-          appBar: ElAppBar(title: Text(fileName)),
-          body: SingleChildScrollView(padding: const EdgeInsets.all(12), child: Text(content)),
-        ),
-      ),
+      MaterialPageRoute(builder: (_) => CodeViewPage(filePath: absolutePath)),
     );
   }
 

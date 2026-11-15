@@ -75,7 +75,6 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
       // 加载默认分支 readme
       await loadReadme();
     } catch (e, st) {
-      log('load repo', error: e, stackTrace: st);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载仓库失败：$e')));
       }
