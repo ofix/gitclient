@@ -6,6 +6,8 @@ import 'package:material_ui/material_ui.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:path/path.dart' as p;
 
+import '../widgets/el_appbar.dart';
+
 class CodeViewPage extends StatefulWidget {
   final String filePath;
   const CodeViewPage({super.key, required this.filePath});
@@ -207,7 +209,7 @@ code {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
+      appBar: ElAppBar(
         title: Text(p.basename(widget.filePath)),
         actions: [
           if (themeList.isNotEmpty)

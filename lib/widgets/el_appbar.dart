@@ -16,6 +16,7 @@ class ElAppBar extends StatelessWidget implements PreferredSizeWidget {
       foregroundColor: ElTheme.textPrimary,
       elevation: 0.5,
       actions: actions,
+      surfaceTintColor: Colors.transparent, // 关键：去掉 Material 3 的默认叠色
     );
   }
 
