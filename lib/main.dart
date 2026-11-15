@@ -3,6 +3,8 @@ import 'package:material_ui/material_ui.dart';
 import 'services/local_archive_service.dart';
 import 'pages/local_repos_page.dart';
 import 'pages/login_page.dart';
+import 'pages/repo_search_page.dart';
+import 'pages/repo_detail_page.dart';
 import 'services/github_auth_service.dart';
 
 void main() async {
@@ -17,7 +19,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'GH Zip Reader',
+      title: 'Github Client',
       theme: ThemeData(useMaterial3: true),
       darkTheme: ThemeData.dark(useMaterial3: true),
 
@@ -27,7 +29,15 @@ class MyApp extends StatelessWidget {
 
       // ✅ 删除 builder + MaterialUiCompatibilityBridge
       // 只有项目混了旧 flutter/material 的组件才需要 bridge
-      routes: {'/local': (ctx) => const LocalReposPage(), '/login': (ctx) => const LoginPage()},
+      routes: {
+        '/local': (ctx) => const LocalReposPage(),
+        '/login': (ctx) => const LoginPage(),
+        '/search': (ctx) => const SearchPage(),
+        '/detail': (ctx) {
+          final args = ModalRoute.of(ctx)!.settings.arguments as Map;
+          return RepoDetailPage(owner: args['owner'], repoName: args['repoName']);
+        },
+      },
       home: const GatePage(),
     );
   }

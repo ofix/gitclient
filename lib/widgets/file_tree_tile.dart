@@ -3,8 +3,6 @@ import 'dart:io';
 import 'package:material_ui/material_ui.dart';
 import 'package:path/path.dart' as p;
 
-import '../services/local_archive_service.dart';
-
 class FileTreeTile extends StatelessWidget {
   final FileSystemEntity entity;
   final int depth;

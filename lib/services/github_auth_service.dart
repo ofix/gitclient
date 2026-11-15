@@ -5,12 +5,20 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_appauth/flutter_appauth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'dart:io';
+
 class GithubAuthService {
   static final GithubAuthService instance = GithubAuthService._internal();
   GithubAuthService._internal();
 
   final FlutterAppAuth _appAuth = const FlutterAppAuth();
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final FlutterSecureStorage _storage = Platform.isMacOS
+      ? const FlutterSecureStorage(
+          mOptions: MacOsOptions(
+            usesDataProtectionKeychain: false, // ✅ 切 legacy login keychain
+          ),
+        )
+      : const FlutterSecureStorage();
 
   static const String clientId = "Ov23li4mggd6g5ibDJZR";
   // ⚠️ 填入你在 GitHub OAuth App 后台拿到的 Client Secret
@@ -41,9 +49,10 @@ class GithubAuthService {
         ),
         scopes: scopes,
       );
+
       final authResult = await _appAuth.authorize(authReq);
+
       final code = authResult.authorizationCode;
-      // ✅ 重点：取出 AppAuth 自动生成的 codeVerifier
       final codeVerifier = authResult.codeVerifier;
 
       if (code == null) {
@@ -64,7 +73,6 @@ class GithubAuthService {
           "client_secret": clientSecret,
           "code": code,
           "redirect_uri": redirectUri,
-          // ✅ 加上这一行！
           "code_verifier": codeVerifier,
         },
       );
@@ -174,16 +182,21 @@ class GithubAuthService {
     String? refreshToken,
     DateTime? expiresIn,
   }) async {
-    _cachedAccessToken = accessToken;
-    _cachedExpiresAt = expiresIn;
-    await _storage.write(key: _kAccessToken, value: accessToken);
-    if (refreshToken != null) {
-      await _storage.write(key: _kRefreshToken, value: refreshToken);
-    }
-    if (expiresIn != null) {
-      await _storage.write(key: _kExpiresAt, value: expiresIn.toIso8601String());
-    } else {
-      await _storage.delete(key: _kExpiresAt);
+    try {
+      _cachedAccessToken = accessToken;
+      _cachedExpiresAt = expiresIn;
+
+      await _storage.write(key: _kAccessToken, value: accessToken);
+      if (refreshToken != null) {
+        await _storage.write(key: _kRefreshToken, value: refreshToken);
+      }
+      if (expiresIn != null) {
+        await _storage.write(key: _kExpiresAt, value: expiresIn.toIso8601String());
+      } else {
+        await _storage.delete(key: _kExpiresAt);
+      }
+    } catch (e) {
+      rethrow;
     }
   }
 

@@ -3,7 +3,6 @@ import 'package:material_ui/material_ui.dart';
 import '../models/local_repo.dart';
 import '../services/local_archive_service.dart';
 import 'file_tree_page.dart';
-import 'search_page.dart';
 
 class LocalReposPage extends StatefulWidget {
   const LocalReposPage({super.key});
@@ -40,7 +39,7 @@ class _LocalReposPageState extends State<LocalReposPage> {
           IconButton(
             icon: const Icon(Icons.search),
             onPressed: () {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchPage()));
+              Navigator.pushNamed(context, '/search');
             },
           ),
         ],

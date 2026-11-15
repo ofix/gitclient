@@ -2,7 +2,6 @@ import 'package:material_ui/material_ui.dart';
 import 'package:github/github.dart';
 
 import '../services/github_service.dart';
-import 'repo_detail_page.dart';
 
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key});
@@ -94,14 +93,10 @@ class _SearchPageState extends State<SearchPage> {
                           children: [Text('⭐ ${repo.stargazersCount}'), Text(repo.language)],
                         ),
                         onTap: () {
-                          Navigator.push(
+                          Navigator.pushNamed(
                             context,
-                            MaterialPageRoute(
-                              builder: (_) => RepoDetailPage(
-                                owner: repo.owner?.login ?? '',
-                                repoName: repo.name,
-                              ),
-                            ),
+                            '/detail',
+                            arguments: {'owner': repo.owner?.login ?? '', 'repoName': repo.name},
                           );
                         },
                       );
