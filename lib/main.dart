@@ -20,8 +20,12 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Github Client',
-      theme: ThemeData(useMaterial3: true),
-      darkTheme: ThemeData.dark(useMaterial3: true),
+      theme: ThemeData(splashFactory: NoSplash.splashFactory, highlightColor: Colors.transparent),
+      darkTheme: ThemeData(
+        splashFactory: NoSplash.splashFactory,
+        highlightColor: Colors.transparent,
+      ),
+      themeMode: ThemeMode.system,
 
       // 官方标准：material_ui 自带全套 delegates
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
