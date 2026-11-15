@@ -51,12 +51,15 @@ class _LocalReposPageState extends State<LocalReposPage> {
               itemBuilder: (ctx, idx) {
                 final r = repos[idx];
                 return ListTile(
-                  title: Text(r.displayName),
+                  title: Text(r.name),
                   subtitle: Text('分支：${r.ref} | 下载：${r.downloadedAt}'),
                   onTap: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => FileTreePage(localRepo: r)),
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            FileTreePage(owner: r.name, repo: r.ref, ref: r.ref, relativePath: ""),
+                      ),
                     );
                   },
                   trailing: IconButton(
@@ -66,7 +69,7 @@ class _LocalReposPageState extends State<LocalReposPage> {
                         context: context,
                         builder: (dctx) => AlertDialog(
                           title: const Text('确认删除'),
-                          content: Text('删除 ${r.displayName}？'),
+                          content: Text('删除 ${r.name}？'),
                           actions: [
                             TextButton(
                               onPressed: () => Navigator.pop(dctx, false),

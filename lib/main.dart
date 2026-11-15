@@ -33,9 +33,9 @@ class MyApp extends StatelessWidget {
         '/local': (ctx) => const LocalReposPage(),
         '/login': (ctx) => const LoginPage(),
         '/search': (ctx) => const SearchPage(),
-        '/detail': (ctx) {
+        '/repo-detail': (ctx) {
           final args = ModalRoute.of(ctx)!.settings.arguments as Map;
-          return RepoDetailPage(owner: args['owner'], repoName: args['repoName']);
+          return RepoDetailPage(owner: args['owner'], repo: args['repo'], branch: args['branch']);
         },
       },
       home: const GatePage(),

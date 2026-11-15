@@ -5,16 +5,19 @@ import 'dart:developer';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:github/github.dart';
+import 'package:dio/dio.dart';
 
 import '../services/github_service.dart';
 import '../services/local_archive_service.dart';
 import '../services/secure_storage_service.dart';
+import '../models/local_repo.dart';
 import 'file_tree_page.dart';
 
 class RepoDetailPage extends StatefulWidget {
   final String owner;
-  final String repoName;
-  const RepoDetailPage({super.key, required this.owner, required this.repoName});
+  final String repo;
+  final String branch;
+  const RepoDetailPage({super.key, required this.owner, required this.repo, required this.branch});
 
   @override
   State<RepoDetailPage> createState() => _RepoDetailPageState();
@@ -26,12 +29,16 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
   String? selectedRef;
   bool loading = true;
   bool downloading = false;
+  bool refreshingRemote = false;
   int downloadRecv = 0;
   int downloadTotal = 0;
   String readme = '';
 
   late final RepositorySlug _slug;
   Timer? _progressThrottle;
+  CancelToken? _downloadCancelToken;
+
+  List<LocalRepo> localBranches = [];
 
   /// 格式化字节
   String formatBytes(int bytes) {
@@ -44,8 +51,9 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
   @override
   void initState() {
     super.initState();
-    _slug = RepositorySlug(widget.owner, widget.repoName);
+    _slug = RepositorySlug(widget.owner, widget.repo);
     loadRepo();
+    loadLocalBranches();
   }
 
   @override
@@ -67,6 +75,7 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
       // 加载默认分支 readme
       await loadReadme();
     } catch (e, st) {
+      log('load repo', error: e, stackTrace: st);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载仓库失败：$e')));
       }
@@ -93,6 +102,40 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
     }
   }
 
+  Future<void> loadLocalBranches() async {
+    final list = await LocalArchiveService.instance.findByOwnerRepo(widget.owner, widget.repo);
+    if (mounted) {
+      setState(() {
+        localBranches = list;
+      });
+    }
+  }
+
+  Future<void> refreshRemoteStatus() async {
+    setState(() => refreshingRemote = true);
+    try {
+      final token = await SecureStorageService.getAccessToken();
+      await LocalArchiveService.instance.refreshRepoRemoteStatus(
+        widget.owner,
+        widget.repo,
+        token: token,
+      );
+      await loadLocalBranches();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('远端版本检查完成')));
+      }
+    } catch (e, st) {
+      log('refresh remote', error: e, stackTrace: st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('检查更新失败：$e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => refreshingRemote = false);
+      }
+    }
+  }
+
   Future<void> doDownload() async {
     if (selectedRef == null || selectedRef!.isEmpty) return;
 
@@ -101,19 +144,19 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
       downloadRecv = 0;
       downloadTotal = 0;
     });
+    _downloadCancelToken = CancelToken();
     try {
       final token = await SecureStorageService.getAccessToken();
       print("read token result: $token");
-      // 👉 删掉：if (token == null) throw Exception('缺少 GitHub Token，请先登录');
-      // 现在 token 允许 null，匿名下载公开仓库
 
       final localRepo = await LocalArchiveService.instance.downloadAndExtract(
         owner: widget.owner,
-        repo: widget.repoName,
+        repo: widget.repo,
         ref: selectedRef!,
+        refType: 'branch',
         token: token ?? "",
+        cancelToken: _downloadCancelToken,
         onProgress: (recv, total) {
-          // 节流：100ms 刷新一次 UI，防止疯狂 rebuild
           if (_progressThrottle?.isActive ?? false) return;
           _progressThrottle = Timer(const Duration(milliseconds: 100), () {
             if (mounted) {
@@ -126,11 +169,19 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
         },
       );
 
+      await loadLocalBranches();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 下载解压完成')));
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => FileTreePage(localRepo: localRepo)),
+          MaterialPageRoute(
+            builder: (_) => FileTreePage(
+              owner: localRepo.owner,
+              repo: localRepo.name,
+              ref: localRepo.ref,
+              relativePath: '',
+            ),
+          ),
         );
       }
     } catch (e, st) {
@@ -140,19 +191,38 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
         if (msg.contains("401") || msg.contains("404")) {
           msg = "私有仓库或Token失效，请登录";
         }
+        if (e is DioException && CancelToken.isCancel(e)) {
+          msg = "下载已取消";
+        }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('❌ $msg')));
       }
     } finally {
       if (mounted) {
         setState(() => downloading = false);
       }
+      _downloadCancelToken = null;
     }
+  }
+
+  Future<void> deleteLocalBranch(LocalRepo item) async {
+    await LocalArchiveService.instance.removeRepo(item);
+    await loadLocalBranches();
+  }
+
+  void enterLocalBranch(LocalRepo item) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            FileTreePage(owner: item.owner, repo: item.name, ref: item.ref, relativePath: ''),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('${widget.owner}/${widget.repoName}')),
+      appBar: AppBar(title: Text('${widget.owner}/${widget.repo}')),
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : repo == null
@@ -168,7 +238,7 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 分支行：Expanded 防止溢出
+                  // 远端分支下拉
                   Row(
                     children: [
                       const Text('分支：', style: TextStyle(fontSize: 16)),
@@ -186,7 +256,6 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
                               : (v) {
                                   setState(() {
                                     selectedRef = v;
-                                    // 切换分支清空下载进度
                                     downloadRecv = 0;
                                     downloadTotal = 0;
                                   });
@@ -219,6 +288,10 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
                               textAlign: TextAlign.center,
                             ),
                             const SizedBox(height: 12),
+                            TextButton(
+                              onPressed: () => _downloadCancelToken?.cancel(),
+                              child: const Text('取消下载', style: TextStyle(color: Colors.red)),
+                            ),
                           ],
                           ElevatedButton(
                             onPressed: downloading ? null : doDownload,
@@ -230,7 +303,107 @@ class _RepoDetailPageState extends State<RepoDetailPage> {
                   ),
                   const SizedBox(height: 24),
 
-                  // README 卡片
+                  // 本地已下载分支区域
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '📂 已下载分支',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                      ),
+                      ElevatedButton(
+                        onPressed: refreshingRemote ? null : refreshRemoteStatus,
+                        child: refreshingRemote
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('检查更新'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (localBranches.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text('暂无本地归档分支'),
+                    )
+                  else
+                    ...localBranches.map((item) {
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 6),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      item.ref,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                  ),
+                                  if (item.isStale)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.shade100,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Text(
+                                        '有更新',
+                                        style: TextStyle(color: Colors.orange, fontSize: 12),
+                                      ),
+                                    )
+                                  else if (item.remoteLatestSha != null)
+                                    const Text(
+                                      '已是最新',
+                                      style: TextStyle(color: Colors.green, fontSize: 12),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text('类型：${item.refType}'),
+                              Text(
+                                '本地 SHA：${item.localCommitSha ?? "未知"}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              Text(
+                                '下载时间：${item.downloadedAt}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                children: [
+                                  ElevatedButton(
+                                    onPressed: () => enterLocalBranch(item),
+                                    child: const Text('浏览源码'),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  TextButton(
+                                    onPressed: () => deleteLocalBranch(item),
+                                    child: const Text('删除', style: TextStyle(color: Colors.red)),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+
+                  const SizedBox(height: 24),
+
+                  // README
                   const Text('README', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                   const SizedBox(height: 8),
                   Card(
