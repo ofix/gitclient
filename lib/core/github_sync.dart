@@ -1,5 +1,5 @@
 export 'github_repo.dart';
-export 'coordinator.dart';
+export 'github_sync_coordinator.dart';
 
 // 调用示例
 // import 'package:flutter/material.dart';
