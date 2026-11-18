@@ -23,6 +23,7 @@ dependencies:
     flutter_appauth: ^13.0.0
     github: ^9.25.1
     flutter_slidable: ^5.2.0
+    intl: ^0.20.3
 
 dev_dependencies:
     flutter_test:

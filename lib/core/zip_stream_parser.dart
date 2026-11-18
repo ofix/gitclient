@@ -1,180 +1,261 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-/// 单次任务内复用的 ZIP 流式解析器。
-/// 负责：搜索 Local File Header → 提取文件名 → 流式 DEFLATE 解压 → 落盘 → 累计偏移。
+// ===================== 内置 CRC32 IEEE (ZIP 使用的标准CRC32) =====================
+class _Crc32 {
+  static final List<int> _table = () {
+    final t = List<int>.filled(256, 0);
+    for (int i = 0; i < 256; i++) {
+      int c = i;
+      for (int j = 0; j < 8; j++) {
+        c = (c & 1) != 0 ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+      }
+      t[i] = c;
+    }
+    return t;
+  }();
+
+  static int update(int crc, Uint8List data) {
+    int c = crc;
+    for (final b in data) {
+      c = _table[(c ^ b) & 0xFF] ^ (c >> 8);
+    }
+    return c;
+  }
+
+  static int finish(int crc) => crc ^ 0xFFFFFFFF;
+}
+// ==============================================================================
+
+enum _EntryState { searchingHeader, inflating, entryDone }
+
 class ZipStreamParser {
   final String localRootDir;
-  final void Function(String path, String localPath, int cumulativeOffset) onFileReady;
+  final void Function(String path, String localPath, int streamOffset) onFileReady;
+  final void Function(Object err)? onError;
 
-  final _headerScanBuf = BytesBuilder();
-  final _fileOutBuf = BytesBuilder();
+  ZipStreamParser({required this.localRootDir, required this.onFileReady, this.onError});
 
-  int _consumedBytes = 0;
+  final _scanBuf = BytesBuilder();
+  int _scanCursor = 0;
+  int _globalStreamOffset = 0;
 
   _EntryState _state = _EntryState.searchingHeader;
   String? _currentName;
+  bool _isUtf8Name = false;
   RawZLibFilter? _inflater;
-
-  ZipStreamParser({required this.localRootDir, required this.onFileReady});
+  RandomAccessFile? _raf;
+  int _entryStartOffset = 0;
+  int _crcAcc = 0xFFFFFFFF;
 
   Future<void> feed(Uint8List chunk) async {
-    _headerScanBuf.add(chunk);
+    _scanBuf.add(chunk);
     await _drain();
   }
 
   Future<void> finish() async {
     await _drain();
     if (_state == _EntryState.inflating) {
-      await _finishCurrentEntry();
+      await _abortCurrentEntry();
+      throw StateError('ZIP stream truncated: unfinished entry');
     }
   }
 
   Future<void> _drain() async {
     while (true) {
-      if (_state == _EntryState.searchingHeader) {
-        if (!_tryParseHeader()) return;
-      } else if (_state == _EntryState.inflating) {
-        if (!await _pumpInflate()) return;
-      } else if (_state == _EntryState.entryDone) {
-        await _finishCurrentEntry();
+      try {
+        switch (_state) {
+          case _EntryState.searchingHeader:
+            final ok = await _tryParseLocalFileHeader();
+            if (!ok) return;
+            break;
+          case _EntryState.inflating:
+            final ok = await _pumpInflate();
+            if (!ok) return;
+            break;
+          case _EntryState.entryDone:
+            await _finishCurrentEntry();
+            break;
+        }
+      } catch (e) {
+        onError?.call(e);
+        await _abortCurrentEntry();
+        _state = _EntryState.searchingHeader;
+        _scanCursor = 0;
       }
     }
   }
 
-  /// 在缓冲区中搜索并解析 Local File Header。成功则进入 inflating 状态。
-  bool _tryParseHeader() {
-    final buf = _headerScanBuf.toBytes();
-
-    int start = -1;
-    for (var i = 0; i + 4 <= buf.length; i++) {
-      if (buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x03 && buf[i + 3] == 0x04) {
-        start = i;
-        break;
-      }
-    }
-
-    if (start < 0) {
-      // 保留最后 3 字节，防止签名跨块
-      final keep = buf.length > 3 ? buf.sublist(buf.length - 3) : buf;
-      _headerScanBuf.clear();
-      _headerScanBuf.add(keep);
+  Future<bool> _tryParseLocalFileHeader() async {
+    final buf = _scanBuf.toBytes();
+    const magicLfh = 0x04034b50;
+    final pos = _findMagic(buf, _scanCursor, magicLfh);
+    if (pos < 0) {
+      _trimScanBuffer();
       return false;
     }
+    _entryStartOffset = _globalStreamOffset + pos;
+    if (buf.length < pos + 30) return false;
 
-    // 头部至少 30 字节
-    if (buf.length < start + 30) return false;
+    final bd = ByteData.sublistView(buf, pos);
+    final flag = bd.getUint16(6, Endian.little);
+    final method = bd.getUint16(8, Endian.little);
+    final nameLen = bd.getUint16(26, Endian.little);
+    final extraLen = bd.getUint16(28, Endian.little);
+    final totalHeaderLen = 30 + nameLen + extraLen;
+    if (buf.length < pos + totalHeaderLen) return false;
 
-    final header = ByteData.sublistView(buf, start);
-    final nameLen = header.getUint16(26, Endian.little);
-    final extraLen = header.getUint16(28, Endian.little);
-    final totalHeader = 30 + nameLen + extraLen;
+    if (method != 8) {
+      throw UnsupportedError('unsupported compression method $method, only deflate(8)');
+    }
+    if ((flag & (1 << 2)) == 0) {
+      throw UnsupportedError('ZIP entry without data descriptor (bit3=0), not github archive');
+    }
+    _isUtf8Name = (flag & (1 << 10)) != 0;
 
-    if (buf.length < start + totalHeader) return false;
+    final nameBytes = buf.sublist(pos + 30, pos + 30 + nameLen);
+    _currentName = _isUtf8Name ? String.fromCharCodes(nameBytes) : String.fromCharCodes(nameBytes);
 
-    final nameBytes = buf.sublist(start + 30, start + 30 + nameLen);
-    final name = String.fromCharCodes(nameBytes);
+    final remain = buf.sublist(pos + totalHeaderLen);
+    _scanBuf.clear();
+    _scanBuf.add(remain);
+    _scanCursor = 0;
+    _globalStreamOffset += pos + totalHeaderLen;
 
-    // 截掉头部字节，保留剩余数据（剩余数据属于当前条目的压缩数据）
-    final remaining = buf.sublist(start + totalHeader);
-    _headerScanBuf.clear();
-    _headerScanBuf.add(remaining);
-    _consumedBytes += start + totalHeader;
-
-    _currentName = name;
-    _fileOutBuf.clear();
     _inflater = RawZLibFilter.inflateFilter(raw: true);
+    _crcAcc = 0xFFFFFFFF;
+    _raf = null;
     _state = _EntryState.inflating;
     return true;
   }
 
-  /// 把缓冲区数据喂给解压器。
-  /// 关键：不依赖 filter.ended（不存在），而是在缓冲区中搜索下一个 PK\x03\x04 来判断条目边界。
   Future<bool> _pumpInflate() async {
-    final buf = _headerScanBuf.toBytes();
-    if (buf.isEmpty) return false;
-
-    // 在缓冲区中搜索下一个文件头签名，以此判断当前条目的压缩数据是否已经完整到达
-    int nextHeader = -1;
-    for (var i = 0; i + 4 <= buf.length; i++) {
-      if (buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x03 && buf[i + 3] == 0x04) {
-        nextHeader = i;
-        break;
+    final buf = _scanBuf.toBytes();
+    const magicDd = 0x08074b50;
+    final ddPos = _findMagic(buf, _scanCursor, magicDd);
+    if (ddPos < 0) {
+      final feedUpTo = buf.length - 3;
+      if (feedUpTo > _scanCursor) {
+        final slice = buf.sublist(_scanCursor, feedUpTo);
+        await _feedInflater(slice);
+        _scanCursor = feedUpTo;
       }
-    }
-
-    if (nextHeader < 0) {
-      // 还没看到下一个文件头，说明当前条目数据可能不完整。
-      // 保守策略：暂时不消费缓冲区，等更多数据到达。
-      // 但如果缓冲区很大（比如超过 1MB），可以先把前面大部分喂给解压器，保留尾部几个字节。
-      if (buf.length > 1024 * 1024) {
-        final feedLen = buf.length - 16; // 保留尾部 16 字节防止签名跨块
-        if (feedLen > 0) {
-          _headerScanBuf.clear();
-          _headerScanBuf.add(buf.sublist(feedLen));
-          final filter = _inflater!;
-          filter.process(buf.sublist(0, feedLen), 0, feedLen);
-          final out = filter.processed(flush: false);
-          if (out != null && out.isNotEmpty) {
-            _fileOutBuf.add(out);
-            _consumedBytes += out.length;
-          }
-        }
-      }
+      _trimScanBuffer();
       return false;
     }
 
-    // 找到了下一个文件头。nextHeader 之前的字节属于当前条目的压缩数据。
-    if (nextHeader > 0) {
-      final filter = _inflater!;
-      filter.process(buf.sublist(0, nextHeader), 0, nextHeader);
-      final out = filter.processed(flush: false);
-      if (out != null && out.isNotEmpty) {
-        _fileOutBuf.add(out);
-        _consumedBytes += out.length;
-      }
+    if (ddPos > _scanCursor) {
+      final slice = buf.sublist(_scanCursor, ddPos);
+      await _feedInflater(slice);
     }
 
-    // 更新缓冲区：只保留从下一个文件头开始的数据
-    _headerScanBuf.clear();
-    _headerScanBuf.add(buf.sublist(nextHeader));
+    if (buf.length < ddPos + 16) return false;
+    final ddView = ByteData.sublistView(buf, ddPos + 4);
+    final expectedCrc = ddView.getUint32(0, Endian.little);
 
-    // 当前条目数据已完整，进入收尾状态
+    await _finalizeInflater();
+    final actualCrc = _Crc32.finish(_crcAcc);
+    if (actualCrc != expectedCrc) {
+      throw StateError(
+        'CRC mismatch for entry ${_currentName}: calc 0x${actualCrc.toRadixString(16)}, expected 0x${expectedCrc.toRadixString(16)}',
+      );
+    }
+
+    final remain = buf.sublist(ddPos + 16);
+    _scanBuf.clear();
+    _scanBuf.add(remain);
+    _scanCursor = 0;
+    _globalStreamOffset += ddPos + 16;
+
     _state = _EntryState.entryDone;
     return true;
   }
 
+  Future<void> _feedInflater(Uint8List data) async {
+    final filter = _inflater!;
+    filter.process(data, 0, data.length);
+    List<int>? rawOut;
+    while ((rawOut = filter.processed(flush: false)) != null && rawOut!.isNotEmpty) {
+      final out = Uint8List.fromList(rawOut);
+      await _writeOutput(out);
+    }
+  }
+
+  Future<void> _finalizeInflater() async {
+    final filter = _inflater!;
+    List<int>? rawOut = filter.processed(end: true);
+    while (rawOut != null && rawOut.isNotEmpty) {
+      final out = Uint8List.fromList(rawOut);
+      await _writeOutput(out);
+      rawOut = filter.processed(end: true);
+    }
+  }
+
+  Future<void> _writeOutput(Uint8List data) async {
+    final name = _currentName!;
+    if (name.endsWith('/')) return;
+    if (_raf == null) {
+      final rel = _stripTopPrefix(name);
+      final localPath = '$localRootDir/$rel';
+      final f = File(localPath);
+      await f.parent.create(recursive: true);
+      _raf = await f.open(mode: FileMode.write);
+    }
+    await _raf!.writeFrom(data);
+    _crcAcc = _Crc32.update(_crcAcc, data);
+  }
+
   Future<void> _finishCurrentEntry() async {
-    final filter = _inflater;
-    if (filter != null) {
-      // 用 end: true 收尾，获取剩余输出
-      final out = filter.processed(end: true);
-      if (out != null && out.isNotEmpty) {
-        _fileOutBuf.add(out);
-      }
+    final name = _currentName!;
+    if (_raf != null) {
+      await _raf!.close();
+      final rel = _stripTopPrefix(name);
+      final localPath = '$localRootDir/$rel';
+      onFileReady(name, localPath, _entryStartOffset);
     }
-
-    final name = _currentName;
-    if (name != null && name.isNotEmpty && !name.endsWith('/')) {
-      final normalized = _stripTopPrefix(name);
-      final file = File('$localRootDir/$normalized');
-      await file.parent.create(recursive: true);
-      await file.writeAsBytes(_fileOutBuf.takeBytes());
-      onFileReady(name, file.path, _consumedBytes);
-    }
-
-    _inflater = null;
-    _currentName = null;
+    await _abortCurrentEntry();
     _state = _EntryState.searchingHeader;
   }
 
+  Future<void> _abortCurrentEntry() async {
+    if (_raf != null) {
+      try {
+        await _raf!.close();
+      } catch (_) {}
+      _raf = null;
+    }
+    _inflater = null;
+    _currentName = null;
+    _crcAcc = 0xFFFFFFFF;
+  }
+
+  int _findMagic(Uint8List buf, int startIdx, int magic) {
+    final b0 = magic & 0xFF;
+    final b1 = (magic >> 8) & 0xFF;
+    final b2 = (magic >> 16) & 0xFF;
+    final b3 = (magic >> 24) & 0xFF;
+    for (int i = startIdx; i + 3 < buf.length; i++) {
+      if (buf[i] == b0 && buf[i + 1] == b1 && buf[i + 2] == b2 && buf[i + 3] == b3) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  void _trimScanBuffer() {
+    final buf = _scanBuf.toBytes();
+    if (buf.length <= 3) return;
+    final tail = buf.sublist(buf.length - 3);
+    _scanBuf.clear();
+    _scanBuf.add(tail);
+    _scanCursor = 0;
+  }
+
   String _stripTopPrefix(String name) {
-    final idx = name.indexOf('/');
-    if (idx >= 0 && idx < name.length - 1) {
-      return name.substring(idx + 1);
+    final slash = name.indexOf('/');
+    if (slash > 0 && slash < name.length - 1) {
+      return name.substring(slash + 1);
     }
     return name;
   }
 }
-
-enum _EntryState { searchingHeader, inflating, entryDone }
