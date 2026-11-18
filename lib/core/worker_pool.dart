@@ -14,8 +14,14 @@ class _QueuedJob {
 
 class SyncWorkerPool {
   final int maxConcurrency;
-  final _workers = <SyncWorkerIsolate>[];
-  final _queue = Queue<_QueuedJob>();
+  final List<SyncWorkerIsolate> _workers = [];
+  final Queue<_QueuedJob> _queue = Queue<_QueuedJob>();
+
+  // 排重：正在运行 / 已经排队的 repoKey
+  final Set<String> _runningRepos = {};
+  // 保存repoKey -> 对应的future，用于重复提交时复用
+  final Map<String, Future<void>> _repoPendingFutures = {};
+
   int _nextId = 0;
   bool _initialized = false;
 
@@ -23,7 +29,6 @@ class SyncWorkerPool {
 
   static int _defaultConcurrency() {
     final cores = Platform.numberOfProcessors;
-    // 移动端保守：最多 2；桌面端取 cores ~/ 2，最多 4
     if (Platform.isAndroid || Platform.isIOS) {
       return cores >= 4 ? 2 : 1;
     }
@@ -42,19 +47,43 @@ class SyncWorkerPool {
   }
 
   Future<void> submit(SyncTask task, void Function(SyncEvent) onEvent) {
+    final repoKey = '${task.owner}/${task.repo}@${task.branch}';
+
+    // 已经有这个repo在跑/排队：直接返回之前的future，不再新增任务
+    if (_repoPendingFutures.containsKey(repoKey)) {
+      return _repoPendingFutures[repoKey]!;
+    }
+
+    final completer = Completer<void>();
+    final future = completer.future;
+    _repoPendingFutures[repoKey] = future;
+    _runningRepos.add(repoKey);
+
     final idle = _workers.where((w) => w.isIdle).firstOrNull;
     if (idle != null) {
-      return _runOn(idle, task, onEvent);
+      _runOn(idle, task, onEvent, repoKey, completer);
+    } else {
+      _queue.add(_QueuedJob(task, onEvent, completer));
     }
-    final completer = Completer<void>();
-    _queue.add(_QueuedJob(task, onEvent, completer));
-    return completer.future;
+    return future;
   }
 
-  Future<void> _runOn(SyncWorkerIsolate w, SyncTask task, void Function(SyncEvent) onEvent) async {
+  Future<void> _runOn(
+    SyncWorkerIsolate w,
+    SyncTask task,
+    void Function(SyncEvent) onEvent,
+    String repoKey,
+    Completer<void> completer,
+  ) async {
     try {
       await w.runTask(task, onEvent);
+      completer.complete();
+    } catch (e, st) {
+      completer.completeError(e, st);
     } finally {
+      // 清理排重标记
+      _runningRepos.remove(repoKey);
+      _repoPendingFutures.remove(repoKey);
       _drainQueue();
     }
   }
@@ -63,16 +92,31 @@ class SyncWorkerPool {
     while (_queue.isNotEmpty) {
       final idle = _workers.where((w) => w.isIdle).firstOrNull;
       if (idle == null) return;
+
       final job = _queue.removeFirst();
-      idle.runTask(job.task, job.onEvent).whenComplete(job.completer.complete);
+      final repoKey = '${job.task.owner}/${job.task.repo}@${job.task.branch}';
+      _runOn(idle, job.task, job.onEvent, repoKey, job.completer);
     }
   }
 
   Future<void> shutdown() async {
-    for (final w in _workers) {
-      w.shutdown();
+    // 排队任务全部失败
+    while (_queue.isNotEmpty) {
+      final j = _queue.removeFirst();
+      j.completer.completeError(Exception('pool shutdown'));
     }
+    // 清空排重表
+    _runningRepos.clear();
+    _repoPendingFutures.clear();
+    // 等待所有worker关闭
+    await Future.wait(_workers.map((w) => w.shutdown()));
     _workers.clear();
     _initialized = false;
   }
+
+  // 监控接口
+  int get runningCount => _workers.where((w) => !w.isIdle).length;
+  int get pendingCount => _queue.length;
+  bool get isIdle => runningCount == 0 && _queue.isEmpty;
+  Set<String> get activeRepos => Set.unmodifiable(_runningRepos);
 }

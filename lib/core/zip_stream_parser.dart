@@ -258,4 +258,13 @@ class ZipStreamParser {
     }
     return name;
   }
+
+  Future<void> abort() async {
+    if (_raf != null) {
+      await _raf!.close();
+      _raf = null;
+    }
+    _inflater = null;
+    _state = _EntryState.searchingHeader;
+  }
 }
