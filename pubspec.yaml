@@ -24,6 +24,7 @@ dependencies:
     github: ^9.25.1
     flutter_slidable: ^5.2.0
     intl: ^0.20.3
+    shared_preferences: ^2.2.2
 
 dev_dependencies:
     flutter_test:
